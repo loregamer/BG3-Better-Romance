@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<save>
+	<version major="4" minor="7" revision="1" build="3" lslib_meta="v1,bswap_guids,lsf_keys_adjacency" />
+	<region id="Flags">
+		<node id="Flags">
+			<attribute id="UUID" type="guid" value="841d7003-a4a0-a14a-d5c8-225edb501b69" />
+			<attribute id="Name" type="FixedString" value="29dbf53f-173e-20de-7cfd-d45fc98b6d20_britches" />
+			<attribute id="Description" type="LSString" value="mol britches option was said" />
+			<attribute id="Usage" type="uint8" value="1" />
+		</node>
+	</region>
+</save>

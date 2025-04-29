@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<save>
+	<version major="4" minor="7" revision="1" build="3" lslib_meta="v1,bswap_guids,lsf_keys_adjacency" />
+	<region id="Flags">
+		<node id="Flags">
+			<attribute id="UUID" type="guid" value="a1560732-d371-19a6-88c9-902c1054477a" />
+			<attribute id="Name" type="FixedString" value="afb88ab5-2e67-4924-a1bb-5d5a248be1d9_saidwouldhirebrother" />
+			<attribute id="Description" type="LSString" value="player asked to hire male drow" />
+			<attribute id="Usage" type="uint8" value="1" />
+		</node>
+	</region>
+</save>

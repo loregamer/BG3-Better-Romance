@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<save>
+	<version major="4" minor="7" revision="1" build="3" lslib_meta="v1,bswap_guids,lsf_keys_adjacency" />
+	<region id="Flags">
+		<node id="Flags">
+			<attribute id="UUID" type="guid" value="6a48c7be-abe0-346c-6334-8e18c957f3aa" />
+			<attribute id="Name" type="FixedString" value="d66c043c-036d-86e3-4e71-29422ee796d2_Minsc_MoreThanOneWitch" />
+			<attribute id="Description" type="LSString" value="d66c043c-036d-86e3-4e71-29422ee796d2_Minsc_MoreThanOneWitchdescription" />
+			<attribute id="Usage" type="uint8" value="1" />
+		</node>
+	</region>
+</save>

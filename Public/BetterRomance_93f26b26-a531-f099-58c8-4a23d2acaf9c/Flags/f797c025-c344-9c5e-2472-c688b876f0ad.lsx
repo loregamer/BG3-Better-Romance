@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<save>
+	<version major="4" minor="7" revision="1" build="3" lslib_meta="v1,bswap_guids,lsf_keys_adjacency" />
+	<region id="Flags">
+		<node id="Flags">
+			<attribute id="UUID" type="guid" value="f797c025-c344-9c5e-2472-c688b876f0ad" />
+			<attribute id="Name" type="FixedString" value="29dbf53f-173e-20de-7cfd-d45fc98b6d20_volo" />
+			<attribute id="Description" type="LSString" value="said volo option in guess 2" />
+			<attribute id="Usage" type="uint8" value="1" />
+		</node>
+	</region>
+</save>
