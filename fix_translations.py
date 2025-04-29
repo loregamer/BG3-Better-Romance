@@ -6,6 +6,8 @@ import os
 import re
 import xml.etree.ElementTree as ET
 import shutil
+import keyring
+import json
 from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                            QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog, 
@@ -123,36 +125,44 @@ class XMLWorker(QThread):
         return None
     
     def _replace_in_files(self, replacements):
-        """Replace contentuid in all files in search directory."""
+        """Replace contentuid in all files in search directory (except english.xml)."""
         search_path = Path(self.search_dir)
         files_to_process = []
         
         # Get list of files
         if self.recursive:
             self.progress_update.emit(f"Scanning directory recursively: {search_path}")
-            xml_files = list(search_path.rglob("*.xml"))
+            all_files = [f for f in search_path.rglob("*") if f.is_file()]
         else:
             self.progress_update.emit(f"Scanning directory: {search_path}")
-            xml_files = list(search_path.glob("*.xml"))
+            all_files = [f for f in search_path.glob("*") if f.is_file()]
         
-        self.progress_update.emit(f"Found {len(xml_files)} XML files to process.")
+        # Filter out english.xml files
+        filtered_files = [f for f in all_files if f.name.lower() != "english.xml"]
+        
+        self.progress_update.emit(f"Found {len(filtered_files)} files to process (excluding english.xml files).")
         
         # Process each file
         self.files_modified = 0
-        for i, file_path in enumerate(xml_files):
+        for i, file_path in enumerate(filtered_files):
             if not self.running:
                 self.progress_update.emit("Operation canceled.")
                 return
             
-            progress = int((i / len(xml_files)) * 100)
+            progress = int((i / len(filtered_files)) * 100)
             self.progress_percent.emit(progress)
             
             try:
                 self.progress_update.emit(f"Processing file: {file_path}")
                 
-                # Read file content
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                # Try to read file as text
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except UnicodeDecodeError:
+                    # Skip binary files
+                    self.progress_update.emit(f"Skipping binary file: {file_path}")
+                    continue
                 
                 # Check if any replacement is needed
                 needs_update = False
@@ -196,10 +206,17 @@ class XMLWorker(QThread):
 class XMLContentManager(QMainWindow):
     """Main application window."""
     
+    # Keyring service name
+    KEYRING_SERVICE = "XMLContentManager"
+    
+    # Keyring keys
+    KEYRING_KEY = "saved_settings"
+    
     def __init__(self):
         super().__init__()
         self.init_ui()
         self.worker = None
+        self.load_saved_settings()
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -245,10 +262,12 @@ class XMLContentManager(QMainWindow):
         
         self.recursive_check = QCheckBox("Search Recursively")
         self.recursive_check.setChecked(True)
+        self.recursive_check.setToolTip("Search in all subdirectories")
         options_layout.addWidget(self.recursive_check)
         
         self.backup_check = QCheckBox("Create Backups")
         self.backup_check.setChecked(True)
+        self.backup_check.setToolTip("Create backup files before modifying")
         options_layout.addWidget(self.backup_check)
         
         main_layout.addLayout(options_layout)
@@ -273,6 +292,11 @@ class XMLContentManager(QMainWindow):
         clear_log_btn.clicked.connect(self.clear_log)
         buttons_layout.addWidget(clear_log_btn)
         
+        save_settings_btn = QPushButton("Save Settings")
+        save_settings_btn.clicked.connect(self.save_settings)
+        save_settings_btn.setToolTip("Save current settings to keyring")
+        buttons_layout.addWidget(save_settings_btn)
+        
         main_layout.addLayout(buttons_layout)
         
         # Progress bar
@@ -293,6 +317,8 @@ class XMLContentManager(QMainWindow):
         
         # Show initial message
         self.log("XML Content Manager started. Please select files to process.")
+        self.log("NOTE: This tool will search ALL files in the selected directory and its subdirectories.")
+        self.log("NOTE: Files named 'english.xml' will be automatically ignored during replacement.")
     
     def browse_original_file(self):
         """Open file dialog to select original XML file."""
@@ -301,6 +327,7 @@ class XMLContentManager(QMainWindow):
         )
         if file_path:
             self.original_file_edit.setText(file_path)
+            self.save_settings()
     
     def browse_new_file(self):
         """Open file dialog to select new XML file."""
@@ -309,6 +336,7 @@ class XMLContentManager(QMainWindow):
         )
         if file_path:
             self.new_file_edit.setText(file_path)
+            self.save_settings()
     
     def browse_search_dir(self):
         """Open directory dialog to select search directory."""
@@ -317,6 +345,58 @@ class XMLContentManager(QMainWindow):
         )
         if dir_path:
             self.search_dir_edit.setText(dir_path)
+            self.save_settings()
+    
+    def save_settings(self):
+        """Save current settings to keyring."""
+        settings = {
+            "original_file": self.original_file_edit.text(),
+            "new_file": self.new_file_edit.text(),
+            "search_dir": self.search_dir_edit.text(),
+            "recursive": self.recursive_check.isChecked(),
+            "backup": self.backup_check.isChecked()
+        }
+        
+        try:
+            # Convert settings to JSON string
+            settings_json = json.dumps(settings)
+            # Save to keyring
+            keyring.set_password(self.KEYRING_SERVICE, self.KEYRING_KEY, settings_json)
+            self.log("Settings saved to keyring")
+        except Exception as e:
+            self.log(f"Error saving settings: {str(e)}")
+    
+    def load_saved_settings(self):
+        """Load settings from keyring."""
+        try:
+            # Get settings from keyring
+            settings_json = keyring.get_password(self.KEYRING_SERVICE, self.KEYRING_KEY)
+            
+            if settings_json:
+                # Parse JSON
+                settings = json.loads(settings_json)
+                
+                # Apply settings
+                if "original_file" in settings and os.path.exists(settings["original_file"]):
+                    self.original_file_edit.setText(settings["original_file"])
+                
+                if "new_file" in settings and os.path.exists(settings["new_file"]):
+                    self.new_file_edit.setText(settings["new_file"])
+                
+                if "search_dir" in settings and os.path.exists(settings["search_dir"]):
+                    self.search_dir_edit.setText(settings["search_dir"])
+                
+                if "recursive" in settings:
+                    self.recursive_check.setChecked(settings["recursive"])
+                
+                if "backup" in settings:
+                    self.backup_check.setChecked(settings["backup"])
+                
+                self.log("Settings loaded from keyring")
+            
+        except Exception as e:
+            self.log(f"Note: No saved settings found or error loading settings: {str(e)}")
+            # This is not a critical error, so just log it
     
     def log(self, message):
         """Add message to log area."""
@@ -444,6 +524,9 @@ class XMLContentManager(QMainWindow):
         self.log(f"ContentUID replacements: {result['replacements']}")
         self.log(f"Files modified: {result['files_modified']}")
         
+        # Save settings after successful operation
+        self.save_settings()
+        
         # Show result dialog
         QMessageBox.information(
             self, "Operation Completed",
@@ -472,6 +555,11 @@ class XMLContentManager(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Set the application name (used by keyring)
+    app.setApplicationName("XMLContentManager")
+    app.setOrganizationName("XMLTools")
+    
     window = XMLContentManager()
     window.show()
     sys.exit(app.exec())
