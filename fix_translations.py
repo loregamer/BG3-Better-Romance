@@ -94,6 +94,12 @@ class LsxConverterWorker(QThread):
                     if process.returncode == 0:
                         self.progress_update.emit(f"Successfully converted: {destination_path}")
                         converted_files += 1
+                        try:
+                            os.remove(source_path)
+                            self.progress_update.emit(f"Successfully deleted original file: {source_path}")
+                        except OSError as e:
+                            self.progress_update.emit(f"Error deleting original file {source_path}: {e}")
+                            # Optionally, add to error_files or handle as a non-critical error
                     else:
                         self.progress_update.emit(f"Error converting {source_path}:")
                         self.progress_update.emit(f"  Return code: {process.returncode}")
@@ -201,6 +207,12 @@ class LsfConverterWorker(QThread):
                     if process.returncode == 0:
                         self.progress_update.emit(f"Successfully converted: {destination_path}")
                         converted_files += 1
+                        try:
+                            os.remove(source_path)
+                            self.progress_update.emit(f"Successfully deleted original file: {source_path}")
+                        except OSError as e:
+                            self.progress_update.emit(f"Error deleting original file {source_path}: {e}")
+                            # Optionally, add to error_files or handle as a non-critical error
                     else:
                         self.progress_update.emit(f"Error converting {source_path}:")
                         self.progress_update.emit(f"  Return code: {process.returncode}")
