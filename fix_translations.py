@@ -1006,7 +1006,7 @@ class XMLContentManager(QMainWindow):
         self.log("\nLSX to LSF Conversion completed.")
         self.log(f"Files scanned: {result['total_scanned']}")
         self.log(f"Successfully converted: {result['converted_files']}")
-        # self.log(f"Skipped: {result['skipped_files']}") # No specific skipping for LSX
+        self.log(f"Skipped (meta.lsx): {result['skipped_files']}") # Display skipped meta.lsx
         if result['error_files']:
             self.log(f"Files with errors ({len(result['error_files'])}):")
             for f_path in result['error_files']:
@@ -1019,7 +1019,7 @@ class XMLContentManager(QMainWindow):
             f"LSX to LSF conversion finished.\n\n"
             f"Files scanned: {result['total_scanned']}\n"
             f"Converted: {result['converted_files']}\n"
-            # f"Skipped: {result['skipped_files']}\n"
+            f"Skipped (meta.lsx): {result['skipped_files']}\n"
             f"Errors: {len(result['error_files'])}"
         )
     
