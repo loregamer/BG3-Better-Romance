@@ -187,6 +187,19 @@ class XMLWorker(QThread):
         if file_extension in ['.pak', '.lsf', '.bin', '.exe', '.dll', '.so', '.dylib', '.jpg', '.png', '.ttf', '.dat', '.db']:
             return False
             
+        # Check if this is an LSX or LSJ file for special handling
+        is_lsx_file = file_extension == '.lsx'
+        is_lsj_file = file_extension == '.lsj'
+        
+        # Add debug info about file type
+        if is_lsx_file:
+            self.progress_update.emit(f"Processing LSX file: {file_path}")
+        elif is_lsj_file:
+            self.progress_update.emit(f"Processing LSJ file: {file_path}")
+        else:
+            # Normal file processing without additional debug info
+            pass
+            
         try:
             # Try to read file as text
             content = None
@@ -230,10 +243,15 @@ class XMLWorker(QThread):
             modified_content = content
             for old_uid, new_uid in replacements.items():
                 if old_uid in content:
+                    # For specific file types, log additional debug info
+                    if is_lsx_file:
+                        self.progress_update.emit(f"Found ID '{old_uid}' in LSX file, will replace with '{new_uid}'")
+                    elif is_lsj_file:
+                        self.progress_update.emit(f"Found ID '{old_uid}' in LSJ file, will replace with '{new_uid}'")
                     # Store original version from original XML
                     original_version = original_contents[new_uid]["version"]
                     
-                    # Make direct UID replacements
+                    # Apply common patterns for all file types
                     # Pattern 1: contentuid="ID" version="VER"
                     pattern1 = fr'contentuid="{re.escape(old_uid)}"\s*version="[^"]*"'
                     replacement1 = f'contentuid="{new_uid}" version="{original_version}"'
@@ -258,13 +276,67 @@ class XMLWorker(QThread):
                         debug_info["changes"].append(f"Pattern 3 matched for {old_uid}")
                     modified_content = modified_content_3
                     
-                    # Pattern 4: handle quoted IDs anywhere
-                    pattern4 = fr'"{re.escape(old_uid)}"'
-                    replacement4 = f'"{new_uid}"'
-                    modified_content_4 = re.sub(pattern4, replacement4, modified_content)
-                    if modified_content_4 != modified_content:
-                        debug_info["changes"].append(f"Pattern 4 matched for {old_uid}")
-                    modified_content = modified_content_4
+                    # Apply file-specific patterns
+                    if is_lsx_file:
+                        # LSX-specific patterns
+                        # Pattern 5: LSX TagText TranslatedString handle format
+                        pattern5 = fr'<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="[^"]*" />'
+                        replacement5 = f'<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}" />'
+                        modified_content_5 = re.sub(pattern5, replacement5, modified_content)
+                        if modified_content_5 != modified_content:
+                            debug_info["changes"].append(f"Pattern 5 matched for {old_uid} - LSX TranslatedString handle")
+                        modified_content = modified_content_5
+                        
+                        # Pattern 6: LSX TranslatedString handle format - alternate
+                        pattern6 = fr'<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="(\d+)"'
+                        replacement6 = f'<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}"'
+                        modified_content_6 = re.sub(pattern6, replacement6, modified_content)
+                        if modified_content_6 != modified_content:
+                            debug_info["changes"].append(f"Pattern 6 matched for {old_uid} - LSX TranslatedString handle alternate")
+                        modified_content = modified_content_6
+                        
+                        # Pattern 9: Specific format from the example (.lsx)
+                        pattern9 = fr'<node id="TagText">\s+<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="[^"]*" />'
+                        replacement9 = f'<node id="TagText">\n\t\t\t\t\t\t\t\t\t\t\t<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}" />'
+                        modified_content_9 = re.sub(pattern9, replacement9, modified_content)
+                        if modified_content_9 != modified_content:
+                            debug_info["changes"].append(f"Pattern 9 matched for {old_uid} - Specific LSX example format")
+                        modified_content = modified_content_9
+                    
+                    elif is_lsj_file:
+                        # LSJ-specific patterns
+                        # Pattern 7: LSJ TranslatedString handle format in JSON
+                        pattern7 = fr'"handle" : "{re.escape(old_uid)}",\s*"type" : "TranslatedString",\s*"version" : \d+'
+                        replacement7 = f'"handle" : "{new_uid}", "type" : "TranslatedString", "version" : {original_version}'
+                        modified_content_7 = re.sub(pattern7, replacement7, modified_content)
+                        if modified_content_7 != modified_content:
+                            debug_info["changes"].append(f"Pattern 7 matched for {old_uid} - LSJ TranslatedString handle")
+                        modified_content = modified_content_7
+                        
+                        # Pattern 8: LSJ TranslatedString handle format - alternate
+                        pattern8 = fr'"handle" : "{re.escape(old_uid)}"'
+                        replacement8 = f'"handle" : "{new_uid}"'
+                        modified_content_8 = re.sub(pattern8, replacement8, modified_content)
+                        if modified_content_8 != modified_content:
+                            debug_info["changes"].append(f"Pattern 8 matched for {old_uid} - LSJ handle only")
+                        modified_content = modified_content_8
+                        
+                        # Pattern 10: Specific format from the example (.lsj)
+                        pattern10 = fr'"TagText" : {{\s+"handle" : "{re.escape(old_uid)}",\s+"type" : "TranslatedString",\s+"version" : \d+\s+}}'
+                        replacement10 = f'"TagText" : {{\n                                                   "handle" : "{new_uid}",\n                                                   "type" : "TranslatedString",\n                                                   "version" : {original_version}\n                                                }}'
+                        modified_content_10 = re.sub(pattern10, replacement10, modified_content)
+                        if modified_content_10 != modified_content:
+                            debug_info["changes"].append(f"Pattern 10 matched for {old_uid} - Specific LSJ example format")
+                        modified_content = modified_content_10
+                    
+                    else:
+                        # For other file types, just check for quoted IDs
+                        pattern4 = fr'"{re.escape(old_uid)}"'
+                        replacement4 = f'"{new_uid}"'
+                        modified_content_4 = re.sub(pattern4, replacement4, modified_content)
+                        if modified_content_4 != modified_content:
+                            debug_info["changes"].append(f"Pattern 4 matched for {old_uid} - quoted ID in other file type")
+                        modified_content = modified_content_4
             
             # Store debug info if changes were made
             if len(debug_info["changes"]) > 0:
