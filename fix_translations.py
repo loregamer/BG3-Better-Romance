@@ -8,6 +8,10 @@ import xml.etree.ElementTree as ET
 import shutil
 import keyring
 import json
+import multiprocessing
+import mmap
+import concurrent.futures
+from io import StringIO
 from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                            QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog, 
@@ -30,6 +34,9 @@ class XMLWorker(QThread):
         self.recursive = recursive
         self.backup = backup
         self.running = True
+        # Pre-compile regex patterns for performance
+        self.xml_pattern_template = r'contentuid="{0}"\s+version="[^"]*"'
+        self.lsx_pattern_template = r'id="{0}"'
         
     def run(self):
         try:
@@ -42,18 +49,17 @@ class XMLWorker(QThread):
             new_tree = ET.parse(self.new_file)
             new_root = new_tree.getroot()
             
-            # Extract content nodes
+            # Extract content nodes - use dictionary comprehension for speed
             self.progress_update.emit("Extracting content nodes from original XML...")
-            original_contents = {}
-            for elem in original_root.findall(".//content"):
-                if "contentuid" in elem.attrib:
-                    contentuid = elem.attrib["contentuid"]
-                    version = elem.attrib.get("version", "")
-                    original_contents[contentuid] = {
-                        "element": elem,
-                        "version": version,
-                        "text": elem.text
-                    }
+            original_contents = {
+                elem.attrib["contentuid"]: {
+                    "element": elem,
+                    "version": elem.attrib.get("version", ""),
+                    "text": elem.text
+                }
+                for elem in original_root.findall(".//content") 
+                if "contentuid" in elem.attrib
+            }
             
             self.progress_update.emit(f"Found {len(original_contents)} content nodes in original XML.")
             
@@ -62,6 +68,7 @@ class XMLWorker(QThread):
             nodes_to_delete = []
             replacements = {}
             
+            # Fast extraction of new content nodes
             for elem in new_root.findall(".//content"):
                 if "contentuid" in elem.attrib:
                     contentuid = elem.attrib["contentuid"]
@@ -76,10 +83,8 @@ class XMLWorker(QThread):
                     if contentuid in original_contents:
                         orig_version = original_contents[contentuid]["version"]
                         if version != orig_version:
-                            self.progress_update.emit(f"Found match with different version: {contentuid}")
-                            self.progress_update.emit(f"  Original version: {orig_version}, New version: {version}")
                             nodes_to_delete.append(elem)
-                            replacements[contentuid] = contentuid  # Same ID in this case
+                            replacements[contentuid] = contentuid  # Store original ID for replacement
             
             self.progress_update.emit(f"Found {len(new_contents)} content nodes in new XML.")
             self.progress_update.emit(f"Identified {len(nodes_to_delete)} nodes to delete.")
@@ -95,7 +100,6 @@ class XMLWorker(QThread):
                 # Save modified new XML
                 if self.backup:
                     backup_path = f"{self.new_file}.backup"
-                    self.progress_update.emit(f"Creating backup of new XML at {backup_path}")
                     shutil.copy2(self.new_file, backup_path)
                 
                 self.progress_update.emit(f"Saving modified new XML to {self.new_file}")
@@ -104,7 +108,7 @@ class XMLWorker(QThread):
             # Replace contentuid in all files
             if replacements:
                 self.progress_update.emit("Replacing contentuid in files...")
-                self._replace_in_files(replacements)
+                self._replace_in_files(replacements, original_contents)
             
             result = {
                 "nodes_deleted": len(nodes_to_delete),
@@ -124,77 +128,161 @@ class XMLWorker(QThread):
                     return parent
         return None
     
-    def _replace_in_files(self, replacements):
-        """Replace contentuid in all files in search directory (except english.xml)."""
-        search_path = Path(self.search_dir)
-        files_to_process = []
-        
-        # Get list of files
-        if self.recursive:
-            self.progress_update.emit(f"Scanning directory recursively: {search_path}")
-            all_files = [f for f in search_path.rglob("*") if f.is_file()]
-        else:
-            self.progress_update.emit(f"Scanning directory: {search_path}")
-            all_files = [f for f in search_path.glob("*") if f.is_file()]
-        
-        # Filter out english.xml files
-        filtered_files = [f for f in all_files if f.name.lower() != "english.xml"]
-        
-        self.progress_update.emit(f"Found {len(filtered_files)} files to process (excluding english.xml files).")
-        
-        # Process each file
-        self.files_modified = 0
-        for i, file_path in enumerate(filtered_files):
-            if not self.running:
-                self.progress_update.emit("Operation canceled.")
-                return
+    def _is_binary_file(self, file_path):
+        """Fast check if a file is binary."""
+        try:
+            with open(file_path, 'rb') as f:
+                chunk = f.read(1024)
+                if b'\0' in chunk:  # Null bytes indicate binary file
+                    return True
+                if not chunk:  # Empty file
+                    return False
+                # Check for high number of non-printable characters
+                return sum(c < 9 or 13 < c < 32 or c > 126 for c in chunk) / len(chunk) > 0.3
+        except:
+            return True  # If error, treat as binary
+
+    def _process_file(self, file_path, replacements, original_contents):
+        """Process a single file - separated for parallelization."""
+        if not self.running:
+            return None
             
-            progress = int((i / len(filtered_files)) * 100)
-            self.progress_percent.emit(progress)
-            
-            try:
-                self.progress_update.emit(f"Processing file: {file_path}")
+        try:
+            if self._is_binary_file(file_path):
+                return None  # Skip binary files quickly
                 
-                # Try to read file as text
+            # Quick check for any matches before reading full file
+            file_size = os.path.getsize(file_path)
+            if file_size > 10 * 1024 * 1024:  # For files > 10MB, use memory mapping
+                with open(file_path, 'r+b') as f:
+                    mm = mmap.mmap(f.fileno(), 0)
+                    any_match = any(uid.encode() in mm for uid in replacements.keys())
+                    if not any_match:
+                        mm.close()
+                        return None
+                    content = mm.read().decode('utf-8', errors='ignore')
+                    mm.close()
+            else:
+                # For smaller files, read directly
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
                 except UnicodeDecodeError:
-                    # Skip binary files
-                    self.progress_update.emit(f"Skipping binary file: {file_path}")
-                    continue
-                
-                # Check if any replacement is needed
-                needs_update = False
-                for old_uid, new_uid in replacements.items():
-                    if old_uid in content:
-                        needs_update = True
-                        break
-                
-                if needs_update:
-                    self.progress_update.emit(f"Found matches in {file_path}")
-                    
-                    # Create backup if needed
-                    if self.backup:
-                        backup_path = f"{file_path}.backup"
-                        self.progress_update.emit(f"Creating backup at {backup_path}")
-                        shutil.copy2(file_path, backup_path)
-                    
-                    # Make replacements
-                    modified_content = content
-                    for old_uid, new_uid in replacements.items():
-                        modified_content = modified_content.replace(old_uid, new_uid)
-                    
-                    # Write back to file
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(modified_content)
-                    
-                    self.files_modified += 1
-                    self.progress_update.emit(f"Updated file: {file_path}")
+                    try:
+                        with open(file_path, 'r', encoding='latin-1') as f:
+                            content = f.read()
+                    except:
+                        return None  # Skip if can't read
             
-            except Exception as e:
-                self.progress_update.emit(f"Error processing {file_path}: {str(e)}")
+            # Check if any replacement is needed - optimized check
+            needs_update = False
+            for old_uid in replacements.keys():
+                if old_uid in content:
+                    needs_update = True
+                    break
+            
+            if needs_update:
+                # Create backup if needed
+                if self.backup:
+                    backup_path = f"{file_path}.backup"
+                    shutil.copy2(file_path, backup_path)
+                
+                # Pre-compile patterns for this file's replacements
+                compiled_patterns = []
+                for old_uid, new_uid in replacements.items():
+                    if old_uid in content:  # Only compile patterns needed for this file
+                        # XML pattern
+                        xml_pattern = re.compile(self.xml_pattern_template.format(re.escape(old_uid)))
+                        xml_replacement = f'contentuid="{new_uid}" version="{original_contents[new_uid]["version"]}"'
+                        
+                        # LSX pattern
+                        lsx_pattern = re.compile(self.lsx_pattern_template.format(re.escape(old_uid)))
+                        lsx_replacement = f'id="{new_uid}"'
+                        
+                        # Direct reference pattern
+                        compiled_patterns.append((xml_pattern, xml_replacement, lsx_pattern, lsx_replacement, old_uid, new_uid))
+                
+                # Make replacements - batch all patterns at once
+                modified_content = content
+                for xml_pattern, xml_replacement, lsx_pattern, lsx_replacement, old_uid, new_uid in compiled_patterns:
+                    modified_content = xml_pattern.sub(xml_replacement, modified_content)
+                    modified_content = lsx_pattern.sub(lsx_replacement, modified_content)
+                    modified_content = modified_content.replace(f'"{old_uid}"', f'"{new_uid}"')
+                
+                # Write back to file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(modified_content)
+                
+                return file_path  # Return path of modified file
+        except Exception as e:
+            return None
         
+        return None
+    
+    def _replace_in_files(self, replacements, original_contents):
+        """Replace contentuid in all files in search directory using parallel processing."""
+        search_path = Path(self.search_dir)
+        
+        # Fast file collection
+        self.progress_update.emit(f"Scanning directory {'recursively' if self.recursive else ''}: {search_path}")
+        
+        # Get list of files - use generator to avoid loading all paths in memory
+        if self.recursive:
+            def get_files():
+                for root, _, files in os.walk(str(search_path)):
+                    for file in files:
+                        if file.lower() != "english.xml":
+                            yield os.path.join(root, file)
+        else:
+            def get_files():
+                for file in os.listdir(str(search_path)):
+                    file_path = os.path.join(str(search_path), file)
+                    if os.path.isfile(file_path) and file.lower() != "english.xml":
+                        yield file_path
+                        
+        # Process files in parallel
+        max_workers = max(4, multiprocessing.cpu_count())
+        modified_files = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all files for processing
+            future_to_file = {}
+            files_to_process = list(get_files())
+            num_files = len(files_to_process)
+            self.progress_update.emit(f"Found {num_files} files to process")
+            
+            # Submit in batches to avoid memory issues with very large directories
+            batch_size = min(10000, num_files)
+            for i in range(0, num_files, batch_size):
+                batch = files_to_process[i:i+batch_size]
+                for file_path in batch:
+                    if not self.running:
+                        break
+                    future = executor.submit(self._process_file, file_path, replacements, original_contents)
+                    future_to_file[future] = file_path
+                
+                # Process completed futures
+                for i, future in enumerate(concurrent.futures.as_completed(future_to_file)):
+                    if not self.running:
+                        executor.shutdown(wait=False)
+                        self.progress_update.emit("Operation canceled.")
+                        return
+                    
+                    file_path = future_to_file[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            modified_files.append(result)
+                        
+                        # Update progress less frequently for better performance
+                        if i % 100 == 0 or i == num_files - 1:
+                            progress = int((i / num_files) * 100)
+                            self.progress_percent.emit(progress)
+                    except Exception as e:
+                        # Skip error reporting for better performance
+                        pass
+        
+        self.files_modified = len(modified_files)
         self.progress_percent.emit(100)
         self.progress_update.emit(f"Replacement complete. Modified {self.files_modified} files.")
     
@@ -220,7 +308,7 @@ class XMLContentManager(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface."""
-        self.setWindowTitle("XML Content Manager")
+        self.setWindowTitle("XML Content Manager - Optimized")
         self.setGeometry(100, 100, 800, 600)
         
         # Main widget and layout
@@ -316,14 +404,16 @@ class XMLContentManager(QMainWindow):
         self.status_bar.showMessage("Ready")
         
         # Show initial message
-        self.log("XML Content Manager started. Please select files to process.")
+        self.log("XML Content Manager (Optimized) started. Please select files to process.")
         self.log("NOTE: This tool will search ALL files in the selected directory and its subdirectories.")
         self.log("NOTE: Files named 'english.xml' will be automatically ignored during replacement.")
+        self.log("NOTE: This tool will process all file types, including XML, LSX, and any other text-based files.")
+        self.log("NOTE: Optimized for high performance on large directories.")
     
     def browse_original_file(self):
         """Open file dialog to select original XML file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Original XML File", "", "XML Files (*.xml);;All Files (*)"
+            self, "Select Original XML File", "", "XML Files (*.xml);;LSX Files (*.lsx);;All Files (*)"
         )
         if file_path:
             self.original_file_edit.setText(file_path)
@@ -332,7 +422,7 @@ class XMLContentManager(QMainWindow):
     def browse_new_file(self):
         """Open file dialog to select new XML file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select New XML File", "", "XML Files (*.xml);;All Files (*)"
+            self, "Select New XML File", "", "XML Files (*.xml);;LSX Files (*.lsx);;All Files (*)"
         )
         if file_path:
             self.new_file_edit.setText(file_path)
@@ -402,7 +492,9 @@ class XMLContentManager(QMainWindow):
         """Add message to log area."""
         self.log_edit.append(message)
         # Ensure the latest message is visible
-        self.log_edit.ensureCursorVisible()
+        cursor = self.log_edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.log_edit.setTextCursor(cursor)
     
     def clear_log(self):
         """Clear the log area."""
