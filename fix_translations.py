@@ -187,6 +187,209 @@ class LsxConverterWorker(QThread):
         """Stop the worker thread."""
         self.running = False
 
+# Helper function for multiprocessing file content replacement
+def process_single_file_for_xml_replacement(args):
+    """Process a single file for XML content replacement (used with multiprocessing)"""
+    file_path, replacements, original_contents, backup, loglevel = args
+    result = {
+        "file_path": str(file_path),
+        "modified": False,
+        "error": None,
+        "logs": [],
+        "debug_info": {"file": str(file_path), "matching_ids": [], "changes": []}
+    }
+    
+    def log(message, level=0, prefix=""):
+        if level <= loglevel:
+            log_entry = f"{prefix}{message}"
+            result["logs"].append(log_entry)
+    
+    # Skip .git directories and common binary files
+    str_path = str(file_path)
+    if ".git" in str_path:
+        return result
+        
+    file_extension = file_path.suffix.lower() if isinstance(file_path, Path) else Path(file_path).suffix.lower()
+    # Fast binary check - skip common binary extensions
+    if file_extension in ['.pak', '.lsf', '.bin', '.exe', '.dll', '.so', '.dylib', '.jpg', '.png', '.ttf', '.dat', '.db']:
+        return result
+        
+    # Check if this is an LSX or LSJ file for special handling
+    is_lsx_file = file_extension == '.lsx'
+    is_lsj_file = file_extension == '.lsj'
+    
+    # Add debug info about file type
+    if is_lsx_file:
+        log(f"Processing LSX file: {file_path}", 2)
+    elif is_lsj_file:
+        log(f"Processing LSJ file: {file_path}", 2)
+        
+    try:
+        # Try to read file as text
+        content = None
+        encoding_used = None
+        for encoding in ['utf-8', 'latin-1']:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                encoding_used = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                log(f"Error reading {file_path} with {encoding}: {str(e)}", 1)
+                continue
+        
+        if content is None:
+            # Couldn't read file with any encoding
+            return result
+        
+        # Check if any replacement is needed
+        needs_update = False
+        matching_ids = []
+        for old_uid in replacements.keys():
+            if old_uid in content:
+                needs_update = True
+                matching_ids.append(old_uid)
+        
+        if not needs_update:
+            return result
+            
+        # Create backup if needed
+        if backup:
+            backup_path = f"{file_path}.backup"
+            try:
+                import shutil
+                shutil.copy2(file_path, backup_path)
+                log(f"Created backup: {backup_path}", 1)
+            except Exception as e:
+                log(f"Error creating backup for {file_path}: {str(e)}", 0, "Error: ")
+                # Continue execution even if backup fails
+        
+        # Add matching IDs to debug info
+        result["debug_info"]["matching_ids"] = matching_ids
+        
+        # Make replacements
+        modified_content = content
+        for old_uid, new_uid in replacements.items():
+            if old_uid in content:
+                # For specific file types, log additional debug info
+                if is_lsx_file:
+                    log(f"Found ID '{old_uid}' in LSX file, will replace with '{new_uid}'", 2)
+                elif is_lsj_file:
+                    log(f"Found ID '{old_uid}' in LSJ file, will replace with '{new_uid}'", 2)
+                # Store original version from original XML
+                original_version = original_contents[new_uid]["version"]
+                
+                # Apply common patterns for all file types
+                # Pattern 1: contentuid="ID" version="VER"
+                pattern1 = fr'contentuid="{re.escape(old_uid)}"\s*version="[^"]*"'
+                replacement1 = f'contentuid="{new_uid}" version="{original_version}"'
+                modified_content_1 = re.sub(pattern1, replacement1, modified_content)
+                if modified_content_1 != modified_content:
+                    result["debug_info"]["changes"].append(f"Pattern 1 matched for {old_uid}")
+                modified_content = modified_content_1
+                
+                # Pattern 2: contentuid="ID"
+                pattern2 = fr'contentuid="{re.escape(old_uid)}"'
+                replacement2 = f'contentuid="{new_uid}"'
+                modified_content_2 = re.sub(pattern2, replacement2, modified_content)
+                if modified_content_2 != modified_content:
+                    result["debug_info"]["changes"].append(f"Pattern 2 matched for {old_uid}")
+                modified_content = modified_content_2
+                
+                # Pattern 3: ID LSX style
+                pattern3 = fr'id="{re.escape(old_uid)}"'
+                replacement3 = f'id="{new_uid}"'
+                modified_content_3 = re.sub(pattern3, replacement3, modified_content)
+                if modified_content_3 != modified_content:
+                    result["debug_info"]["changes"].append(f"Pattern 3 matched for {old_uid}")
+                modified_content = modified_content_3
+                
+                # Apply file-specific patterns
+                if is_lsx_file:
+                    # LSX-specific patterns
+                    # Pattern 5: LSX TagText TranslatedString handle format
+                    pattern5 = fr'<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="[^"]*" />'
+                    replacement5 = f'<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}" />'
+                    modified_content_5 = re.sub(pattern5, replacement5, modified_content)
+                    if modified_content_5 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 5 matched for {old_uid} - LSX TranslatedString handle")
+                    modified_content = modified_content_5
+                    
+                    # Pattern 6: LSX TranslatedString handle format - alternate
+                    pattern6 = fr'<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="(\d+)"'
+                    replacement6 = f'<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}"'
+                    modified_content_6 = re.sub(pattern6, replacement6, modified_content)
+                    if modified_content_6 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 6 matched for {old_uid} - LSX TranslatedString handle alternate")
+                    modified_content = modified_content_6
+                    
+                    # Pattern 9: Specific format from the example (.lsx)
+                    pattern9 = fr'<node id="TagText">\s+<attribute id="TagText" type="TranslatedString" handle="{re.escape(old_uid)}" version="[^"]*" />'
+                    replacement9 = f'<node id="TagText">\n\t\t\t\t\t\t\t\t\t\t\t<attribute id="TagText" type="TranslatedString" handle="{new_uid}" version="{original_version}" />'
+                    modified_content_9 = re.sub(pattern9, replacement9, modified_content)
+                    if modified_content_9 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 9 matched for {old_uid} - Specific LSX example format")
+                    modified_content = modified_content_9
+                
+                elif is_lsj_file:
+                    # LSJ-specific patterns
+                    # Pattern 7: LSJ TranslatedString handle format in JSON
+                    pattern7 = fr'"handle" : "{re.escape(old_uid)}",\s*"type" : "TranslatedString",\s*"version" : \d+'
+                    replacement7 = f'"handle" : "{new_uid}", "type" : "TranslatedString", "version" : {original_version}'
+                    modified_content_7 = re.sub(pattern7, replacement7, modified_content)
+                    if modified_content_7 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 7 matched for {old_uid} - LSJ TranslatedString handle")
+                    modified_content = modified_content_7
+                    
+                    # Pattern 8: LSJ TranslatedString handle format - alternate
+                    pattern8 = fr'"handle" : "{re.escape(old_uid)}"'
+                    replacement8 = f'"handle" : "{new_uid}"'
+                    modified_content_8 = re.sub(pattern8, replacement8, modified_content)
+                    if modified_content_8 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 8 matched for {old_uid} - LSJ handle only")
+                    modified_content = modified_content_8
+                    
+                    # Pattern 10: Specific format from the example (.lsj)
+                    pattern10 = fr'"TagText" : {{\s+"handle" : "{re.escape(old_uid)}",\s+"type" : "TranslatedString",\s+"version" : \d+\s+}}'
+                    replacement10 = f'"TagText" : {{\n                                                   "handle" : "{new_uid}",\n                                                   "type" : "TranslatedString",\n                                                   "version" : {original_version}\n                                                }}'
+                    modified_content_10 = re.sub(pattern10, replacement10, modified_content)
+                    if modified_content_10 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 10 matched for {old_uid} - Specific LSJ example format")
+                    modified_content = modified_content_10
+                
+                else:
+                    # For other file types, just check for quoted IDs
+                    pattern4 = fr'"{re.escape(old_uid)}"'
+                    replacement4 = f'"{new_uid}"'
+                    modified_content_4 = re.sub(pattern4, replacement4, modified_content)
+                    if modified_content_4 != modified_content:
+                        result["debug_info"]["changes"].append(f"Pattern 4 matched for {old_uid} - quoted ID in other file type")
+                    modified_content = modified_content_4
+        
+        # Only write if content changed
+        if modified_content != content:
+            try:
+                with open(file_path, 'w', encoding=encoding_used) as f:
+                    f.write(modified_content)
+                result["modified"] = True
+                log(f"Updated file: {file_path}", 1)
+                return result
+            except Exception as e:
+                error_msg = f"Error writing to {file_path}: {str(e)}"
+                log(error_msg, 0, "Error: ")
+                result["error"] = error_msg
+                return result
+        else:
+            return result
+        
+    except Exception as e:
+        error_msg = f"Error in process_single_file_for_xml_replacement for {file_path}: {str(e)}"
+        log(error_msg, 0, "Error: ")
+        result["error"] = error_msg
+        return result
+
 # Helper function for multiprocessing LSF conversion
 def process_lsf_file_conversion(args):
     divine_exe_path, file_path_str, delete_original = args
@@ -354,7 +557,7 @@ class XMLWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
     
-    def __init__(self, original_file, new_file, search_dir, recursive=True, backup=True):
+    def __init__(self, original_file, new_file, search_dir, recursive=True, backup=True, processes=None):
         super().__init__()
         self.original_file = original_file
         self.new_file = new_file
@@ -362,6 +565,9 @@ class XMLWorker(QThread):
         self.recursive = recursive
         self.backup = backup
         self.running = True
+        # Set the number of processes for multiprocessing
+        self.processes = processes if processes is not None else multiprocessing.cpu_count()
+        self.loglevel = 1  # Default log level for worker
         
     def run(self):
         try:
@@ -464,7 +670,7 @@ class XMLWorker(QThread):
         return None
     
     def _replace_in_files(self, replacements, original_contents):
-        """Replace contentuid in all files in search directory (except english.xml)."""
+        """Replace contentuid in all files in search directory using multiprocessing (except english.xml)."""
         search_path = Path(self.search_dir)
         files_to_process = []
         
@@ -481,37 +687,83 @@ class XMLWorker(QThread):
         
         self.progress_update.emit(f"Found {len(filtered_files)} files to process (excluding english.xml files).")
         
-        # Process each file
+        if not filtered_files:
+            self.progress_update.emit("No files to process.")
+            return True
+
+        # Initialize counters
         self.files_modified = 0
         self.debug_info = []  # Store debug info for each file
         
-        for i, file_path in enumerate(filtered_files):
-            if not self.running:
-                self.progress_update.emit("Operation canceled.")
-                return
-            
-            progress = int((i / len(filtered_files)) * 100)
-            self.progress_percent.emit(progress)
-            
-            try:
-                # Process file
-                modified = self._process_file(file_path, replacements, original_contents)
-                if modified:
-                    self.files_modified += 1
-                    if self.files_modified <= 5:  # Show only first 5 for brevity
-                        self.progress_update.emit(f"Modified file: {file_path}")
-                    elif self.files_modified == 6:
-                        self.progress_update.emit("More files modified...")
-            except Exception as e:
-                self.progress_update.emit(f"Error processing {file_path}: {str(e)}")
+        # Create a list of arguments for multiprocessing
+        args_list = [(file_path, replacements, original_contents, self.backup, self.loglevel) 
+                     for file_path in filtered_files]
         
-        self.progress_percent.emit(100)
+        # Calculate optimal number of processes
+        total_files = len(filtered_files)
+        # Adjust process count to avoid creating too many processes for few files
+        num_processes = min(total_files, self.processes)
+        if num_processes <= 0 and total_files > 0:
+            num_processes = 1
+            
+        self.progress_update.emit(f"Starting file processing with {num_processes} worker processes.")
+        
+        processed_count = 0
+        try:
+            with multiprocessing.Pool(processes=num_processes) as pool:
+                # Use imap_unordered for better performance with incremental results
+                results_iterator = pool.imap_unordered(process_single_file_for_xml_replacement, args_list)
+                
+                for i, result in enumerate(results_iterator):
+                    if not self.running:
+                        self.progress_update.emit("Operation canceled.")
+                        # This will not immediately stop running workers, but no new tasks will be started
+                        pool.terminate()
+                        break
+                    
+                    processed_count = i + 1
+                    progress = int((processed_count / total_files) * 100)
+                    self.progress_percent.emit(progress)
+                    
+                    # Process logs
+                    for log_entry in result.get("logs", []):
+                        self.progress_update.emit(log_entry)
+                    
+                    # Update stats
+                    if result["modified"]:
+                        self.files_modified += 1
+                        if self.files_modified <= 5:  # Show only first 5 for brevity
+                            self.progress_update.emit(f"Modified file: {result['file_path']}")
+                        elif self.files_modified == 6:
+                            self.progress_update.emit("More files modified...")
+                    
+                    # Store debug info if there are changes
+                    if result["debug_info"]["changes"]:
+                        self.debug_info.append(result["debug_info"])
+                    
+                    # Handle errors
+                    if result["error"]:
+                        self.progress_update.emit(f"Error: {result['error']}")
+        except Exception as e:
+            self.progress_update.emit(f"Error during multiprocessing: {str(e)}")
+            self.error_signal.emit(f"Error during multiprocessing: {str(e)}")
+            return False
+        
+        # Ensure progress bar reaches 100% if not cancelled
+        if self.running and processed_count == total_files:
+            self.progress_percent.emit(100)
+        elif not self.running:
+            # If cancelled, emit current progress
+            self.progress_percent.emit(int((processed_count / total_files) * 100))
+        
         self.progress_update.emit(f"Replacement complete. Modified {self.files_modified} files.")
         
         # Display debug info for the first few modified files
-        if hasattr(self, 'debug_info') and self.debug_info:
+        if self.debug_info:
             for info in self.debug_info[:3]:  # Show only first 3 for brevity
                 self.progress_update.emit(f"Debug info: {info}")
+                
+        return True
     
     def _process_file(self, file_path, replacements, original_contents):
         """Process a single file and return True if it was modified."""
@@ -990,12 +1242,17 @@ class XMLContentManager(QMainWindow):
         self.progress_bar.setValue(0)
         
         # Create and start worker
+        # Determine number of processes based on CPU count
+        processes = multiprocessing.cpu_count()
+        self.log(f"Using {processes} CPU cores for multiprocessing")
+        
         self.xml_worker = XMLWorker(
             self.original_file_edit.text(),
             self.new_file_edit.text(),
             self.search_dir_edit.text(),
             self.recursive_check.isChecked(),
-            self.backup_check.isChecked()
+            self.backup_check.isChecked(),
+            processes
         )
         
         # Connect signals
@@ -1225,6 +1482,10 @@ class XMLContentManager(QMainWindow):
 
 
 def main():
+    # On Windows, protect the entry point to avoid recursive spawning with multiprocessing
+    if sys.platform == 'win32':
+        multiprocessing.freeze_support()
+        
     app = QApplication(sys.argv)
     
     # Set the application name (used by keyring)
