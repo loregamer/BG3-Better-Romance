@@ -4619,7 +4619,7 @@
                                                 "TagText" : {
                                                    "handle" : "h6365aa06ge873g4a97ga4f3gfb6a45ad7e53",
                                                    "type" : "TranslatedString",
-                                                   "version" : 5
+                                                   "version" : 2
                                                 },
                                                 "stub" : {"type" : "bool", "value" : true}
                                              }
