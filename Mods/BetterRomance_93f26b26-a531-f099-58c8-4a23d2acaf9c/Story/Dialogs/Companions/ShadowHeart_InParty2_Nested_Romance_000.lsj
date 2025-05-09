@@ -11779,7 +11779,7 @@
                                                 "TagText" : {
                                                    "handle" : "hfcc95767gbac6g4c9dg834fg7e88f2965bd4",
                                                    "type" : "TranslatedString",
-                                                   "version" : 3
+                                                   "version" : 1
                                                 },
                                                 "stub" : {"type" : "bool", "value" : true}
                                              }
