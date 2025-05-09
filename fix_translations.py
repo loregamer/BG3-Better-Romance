@@ -290,11 +290,17 @@ class XMLWorker(QThread):
                     # Check if this contentuid exists in original with different version
                     if contentuid in original_contents:
                         orig_version = original_contents[contentuid]["version"]
-                        if version != orig_version:
-                            self.progress_update.emit(f"Found match with different version: {contentuid}")
+                        orig_text = original_contents[contentuid]["text"]
+                        curr_text = elem.text
+                        # Only revert the version if the contents are the same
+                        if version != orig_version and orig_text == curr_text:
+                            self.progress_update.emit(f"Found match with different version but same content: {contentuid}")
                             self.progress_update.emit(f"  Original version: {orig_version}, New version: {version}")
                             nodes_to_delete.append(elem)
                             replacements[contentuid] = contentuid  # Store original ID for replacement
+                        elif version != orig_version:
+                            self.progress_update.emit(f"Found match with different version and different content: {contentuid}")
+                            self.progress_update.emit(f"  Not reverting version as content is different")
             
             self.progress_update.emit(f"Found {len(new_contents)} content nodes in new XML.")
             self.progress_update.emit(f"Identified {len(nodes_to_delete)} nodes to delete.")
