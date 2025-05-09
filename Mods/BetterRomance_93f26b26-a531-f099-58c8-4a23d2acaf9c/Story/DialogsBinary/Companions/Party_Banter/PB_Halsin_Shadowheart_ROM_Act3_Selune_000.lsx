@@ -68,7 +68,7 @@
 												<node id="TagTexts">
 													<children>
 														<node id="TagText">
-															<attribute id="TagText" type="TranslatedString" handle="h7982d4e4g86e3g4d87g86c9gb1833e71fac8" version="3" />
+											<attribute id="TagText" type="TranslatedString" handle="h7982d4e4g86e3g4d87g86c9gb1833e71fac8" version="1" />
 															<attribute id="LineId" type="guid" value="fa9f6e1b-935c-4ece-818e-eebb79366573" />
 															<attribute id="stub" type="bool" value="True" />
 														</node>
@@ -128,7 +128,7 @@
 												<node id="TagTexts">
 													<children>
 														<node id="TagText">
-															<attribute id="TagText" type="TranslatedString" handle="h3a686000g1547g4fe5g8fa7g1677e2aec3ad" version="3" />
+											<attribute id="TagText" type="TranslatedString" handle="h3a686000g1547g4fe5g8fa7g1677e2aec3ad" version="1" />
 															<attribute id="LineId" type="guid" value="21790487-3125-4696-b931-03792a857898" />
 															<attribute id="stub" type="bool" value="True" />
 														</node>
@@ -183,7 +183,7 @@
 												<node id="TagTexts">
 													<children>
 														<node id="TagText">
-															<attribute id="TagText" type="TranslatedString" handle="h16684c1dge749g4a8fg840dgdfea77286107" version="3" />
+											<attribute id="TagText" type="TranslatedString" handle="h16684c1dge749g4a8fg840dgdfea77286107" version="1" />
 															<attribute id="LineId" type="guid" value="99420a3b-531a-404c-9226-a74226819b38" />
 															<attribute id="stub" type="bool" value="True" />
 														</node>
