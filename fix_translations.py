@@ -16,6 +16,112 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 
+class LsxConverterWorker(QThread):
+    """Worker thread for converting LSX to LSF files."""
+    progress_update = pyqtSignal(str)
+    progress_percent = pyqtSignal(int)
+    finished_signal = pyqtSignal(dict)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, search_dir, recursive=True):
+        super().__init__()
+        self.search_dir = search_dir
+        self.recursive = recursive
+        self.running = True
+        self.divine_exe_path = os.path.join(os.getcwd(), "Tools", "Divine.exe")
+
+    def run(self):
+        try:
+            converted_files = 0
+            skipped_files = 0 # Not applicable here but keep structure
+            error_files = []
+
+            if not os.path.exists(self.divine_exe_path):
+                self.error_signal.emit(f"Error: Divine.exe not found at {self.divine_exe_path}")
+                return
+
+            self.progress_update.emit(f"Starting LSX to LSF conversion using Divine.exe from: {self.divine_exe_path}")
+            self.progress_update.emit(f"Scanning directory: {self.search_dir}")
+
+            files_to_scan = []
+            search_path_obj = Path(self.search_dir)
+
+            if self.recursive:
+                self.progress_update.emit(f"Scanning directory recursively: {search_path_obj}")
+                all_files_in_dir = [f for f in search_path_obj.rglob("*.lsx") if f.is_file()]
+            else:
+                self.progress_update.emit(f"Scanning directory (non-recursively): {search_path_obj}")
+                all_files_in_dir = [f for f in search_path_obj.glob("*.lsx") if f.is_file()]
+            
+            files_to_scan = [
+                f for f in all_files_in_dir
+                if ".git" not in f.parts and "Tools" not in f.parts
+            ]
+
+            total_files = len(files_to_scan)
+            self.progress_update.emit(f"Found {total_files} .lsx files to potentially convert.")
+
+            for i, file_path_obj in enumerate(files_to_scan):
+                if not self.running:
+                    self.progress_update.emit("LSX Conversion Canceled.")
+                    return
+
+                self.progress_percent.emit(int(((i + 1) / total_files) * 100))
+                
+                filename = file_path_obj.name # Get filename
+                source_path = str(file_path_obj)
+
+                if filename.lower() == "meta.lsx": # Check for meta.lsx
+                    self.progress_update.emit(f"Skipping: {source_path} (meta.lsx)")
+                    skipped_files += 1
+                    continue
+                
+                destination_path = file_path_obj.with_suffix(".lsf")
+
+                command = [
+                    self.divine_exe_path,
+                    "--action", "convert-resource",
+                    "--game", "bg3",
+                    "--source", source_path,
+                    "--destination", str(destination_path),
+                    "--loglevel", "error"
+                ]
+
+                try:
+                    self.progress_update.emit(f"Converting: {source_path} -> {destination_path}")
+                    process = subprocess.run(command, capture_output=True, text=True, check=False, shell=False)
+                    
+                    if process.returncode == 0:
+                        self.progress_update.emit(f"Successfully converted: {destination_path}")
+                        converted_files += 1
+                    else:
+                        self.progress_update.emit(f"Error converting {source_path}:")
+                        self.progress_update.emit(f"  Return code: {process.returncode}")
+                        if process.stdout:
+                            self.progress_update.emit(f"  Stdout: {process.stdout.strip()}")
+                        if process.stderr:
+                            self.progress_update.emit(f"  Stderr: {process.stderr.strip()}")
+                        error_files.append(source_path)
+                except Exception as e:
+                    self.progress_update.emit(f"Exception during conversion of {source_path}: {e}")
+                    error_files.append(source_path)
+            
+            self.progress_percent.emit(100)
+            result = {
+                "converted_files": converted_files,
+                "skipped_files": skipped_files, # Now correctly tracks skipped meta.lsx
+                "error_files": error_files,
+                "total_scanned": total_files
+            }
+            self.finished_signal.emit(result)
+
+        except Exception as e:
+            self.error_signal.emit(f"Error in LsxConverterWorker: {str(e)}")
+
+    def stop(self):
+        """Stop the worker thread."""
+        self.running = False
+
 class LsfConverterWorker(QThread):
     """Worker thread for converting LSF to LSX files."""
     progress_update = pyqtSignal(str)
@@ -480,8 +586,9 @@ class XMLContentManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.init_ui()
-        self.xml_worker = None # Renamed for clarity
+        self.xml_worker = None
         self.lsf_worker = None
+        self.lsx_worker = None # Added for LSX to LSF conversion
         self.load_saved_settings()
     
     def init_ui(self):
@@ -541,9 +648,9 @@ class XMLContentManager(QMainWindow):
         # Action buttons
         buttons_layout = QHBoxLayout()
         
-        self.analyze_btn = QPushButton("Analyze Files")
-        self.analyze_btn.clicked.connect(self.analyze_files)
-        buttons_layout.addWidget(self.analyze_btn)
+        # self.analyze_btn = QPushButton("Analyze Files") # Removed
+        # self.analyze_btn.clicked.connect(self.analyze_files) # Removed
+        # buttons_layout.addWidget(self.analyze_btn) # Removed
         
         self.process_btn = QPushButton("Process Files")
         self.process_btn.clicked.connect(self.process_files)
@@ -567,6 +674,11 @@ class XMLContentManager(QMainWindow):
         self.convert_lsf_btn.clicked.connect(self.run_lsf_conversion)
         self.convert_lsf_btn.setToolTip("Convert all .lsf files to .lsx in the search directory (excluding meta.lsf)")
         buttons_layout.addWidget(self.convert_lsf_btn)
+
+        self.convert_lsx_btn = QPushButton("Convert LSX to LSF")
+        self.convert_lsx_btn.clicked.connect(self.run_lsx_conversion)
+        self.convert_lsx_btn.setToolTip("Convert all .lsx files to .lsf in the search directory")
+        buttons_layout.addWidget(self.convert_lsx_btn)
         
         main_layout.addLayout(buttons_layout)
         
@@ -716,13 +828,13 @@ class XMLContentManager(QMainWindow):
         
         return True
     
-    def analyze_files(self):
-        """Analyze files without making changes."""
-        if not self.validate_inputs():
-            return
-        
-        # Create worker thread for analysis only
-        self.start_worker(analysis_only=True)
+    # def analyze_files(self): # Removed
+    #     """Analyze files without making changes.""" # Removed
+    #     if not self.validate_inputs(): # Removed
+    #         return # Removed
+    #      # Removed
+    #     # Create worker thread for analysis only # Removed
+    #     self.start_worker(analysis_only=True) # Removed
     
     def process_files(self):
         """Process files and make changes."""
@@ -739,17 +851,20 @@ class XMLContentManager(QMainWindow):
         
         if reply == QMessageBox.StandardButton.Yes:
             # Create worker thread for full processing
-            self.start_worker(analysis_only=False)
+            self.start_xml_worker() # Changed from self.start_worker(analysis_only=False)
     
-    def start_worker(self, analysis_only=False):
-        """Start the worker thread."""
+    def start_xml_worker(self): # Renamed from start_worker, removed analysis_only
+        """Start the XML processing worker thread."""
         # Disable UI elements
-        self.analyze_btn.setEnabled(False)
+        # self.analyze_btn.setEnabled(False) # Removed
         self.process_btn.setEnabled(False)
+        self.convert_lsf_btn.setEnabled(False)
+        self.convert_lsx_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         
         # Update status
-        self.status_bar.showMessage("Processing..." if not analysis_only else "Analyzing...")
+        self.status_bar.showMessage("Processing XML files...") # Simplified message
+        self.progress_bar.setValue(0)
         
         # Create and start worker
         self.xml_worker = XMLWorker(
@@ -767,7 +882,7 @@ class XMLContentManager(QMainWindow):
         self.xml_worker.error_signal.connect(self.handle_error)
         
         # Start worker
-        self.log(f"{'Analysis' if analysis_only else 'Processing'} started...")
+        self.log("XML Processing started...") # Simplified message
         self.xml_worker.start()
 
     def run_lsf_conversion(self):
@@ -789,9 +904,10 @@ class XMLContentManager(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.analyze_btn.setEnabled(False)
+        # self.analyze_btn.setEnabled(False) # Removed
         self.process_btn.setEnabled(False)
         self.convert_lsf_btn.setEnabled(False)
+        self.convert_lsx_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.status_bar.showMessage("Converting LSF to LSX...")
         self.progress_bar.setValue(0)
@@ -810,9 +926,10 @@ class XMLContentManager(QMainWindow):
 
     def lsf_conversion_finished(self, result):
         """Handle LSF conversion finished event."""
-        self.analyze_btn.setEnabled(True)
+        # self.analyze_btn.setEnabled(True) # Removed
         self.process_btn.setEnabled(True)
         self.convert_lsf_btn.setEnabled(True)
+        self.convert_lsx_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.status_bar.showMessage("Ready")
         self.progress_bar.setValue(100)
@@ -836,16 +953,89 @@ class XMLContentManager(QMainWindow):
             f"Skipped: {result['skipped_files']}\n"
             f"Errors: {len(result['error_files'])}"
         )
+
+    def run_lsx_conversion(self):
+        """Start the LSX to LSF conversion worker."""
+        search_dir = self.search_dir_edit.text().strip()
+        if not search_dir:
+            QMessageBox.warning(self, "Input Error", "Search directory is required for LSX conversion.")
+            return
+        if not os.path.isdir(search_dir):
+            QMessageBox.warning(self, "Input Error", f"Search directory not found: {search_dir}")
+            return
+
+        reply = QMessageBox.question(
+            self, "Confirm LSX Conversion",
+            "This will convert .lsx files to .lsf in the specified directory. Do you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # self.analyze_btn.setEnabled(False) # Removed
+        self.process_btn.setEnabled(False)
+        self.convert_lsf_btn.setEnabled(False)
+        self.convert_lsx_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.status_bar.showMessage("Converting LSX to LSF...")
+        self.progress_bar.setValue(0)
+
+        self.lsx_worker = LsxConverterWorker( # Use LsxConverterWorker
+            search_dir,
+            self.recursive_check.isChecked()
+        )
+        self.lsx_worker.progress_update.connect(self.log)
+        self.lsx_worker.progress_percent.connect(self.progress_bar.setValue)
+        self.lsx_worker.finished_signal.connect(self.lsx_conversion_finished) # New handler
+        self.lsx_worker.error_signal.connect(self.handle_error)
+
+        self.log("LSX to LSF conversion started...")
+        self.lsx_worker.start()
+
+    def lsx_conversion_finished(self, result):
+        """Handle LSX conversion finished event."""
+        # self.analyze_btn.setEnabled(True) # Removed
+        self.process_btn.setEnabled(True)
+        self.convert_lsf_btn.setEnabled(True)
+        self.convert_lsx_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.status_bar.showMessage("Ready")
+        self.progress_bar.setValue(100)
+
+        self.log("\nLSX to LSF Conversion completed.")
+        self.log(f"Files scanned: {result['total_scanned']}")
+        self.log(f"Successfully converted: {result['converted_files']}")
+        # self.log(f"Skipped: {result['skipped_files']}") # No specific skipping for LSX
+        if result['error_files']:
+            self.log(f"Files with errors ({len(result['error_files'])}):")
+            for f_path in result['error_files']:
+                self.log(f"  - {f_path}")
+        else:
+            self.log("No errors encountered during LSX conversion.")
+        
+        QMessageBox.information(
+            self, "LSX Conversion Completed",
+            f"LSX to LSF conversion finished.\n\n"
+            f"Files scanned: {result['total_scanned']}\n"
+            f"Converted: {result['converted_files']}\n"
+            # f"Skipped: {result['skipped_files']}\n"
+            f"Errors: {len(result['error_files'])}"
+        )
     
     def cancel_operation(self):
         """Cancel the current operation."""
         worker_to_cancel = None
+        operation_name = "Unknown operation"
         if self.xml_worker and self.xml_worker.isRunning():
             worker_to_cancel = self.xml_worker
             operation_name = "XML processing"
         elif self.lsf_worker and self.lsf_worker.isRunning():
             worker_to_cancel = self.lsf_worker
-            operation_name = "LSF conversion"
+            operation_name = "LSF to LSX conversion"
+        elif self.lsx_worker and self.lsx_worker.isRunning(): # Added check for lsx_worker
+            worker_to_cancel = self.lsx_worker
+            operation_name = "LSX to LSF conversion"
         else:
             self.log("No operation currently running to cancel.")
             return
@@ -865,8 +1055,10 @@ class XMLContentManager(QMainWindow):
     def process_finished(self, result):
         """Handle process finished event."""
         # Re-enable UI elements
-        self.analyze_btn.setEnabled(True)
+        # self.analyze_btn.setEnabled(True) # Removed
         self.process_btn.setEnabled(True)
+        self.convert_lsf_btn.setEnabled(True) # Ensure this is re-enabled
+        self.convert_lsx_btn.setEnabled(True) # Ensure this is re-enabled
         self.cancel_btn.setEnabled(False)
         
         # Update status
@@ -893,8 +1085,10 @@ class XMLContentManager(QMainWindow):
     def handle_error(self, error_message):
         """Handle error from worker thread."""
         # Re-enable UI elements
-        self.analyze_btn.setEnabled(True)
+        # self.analyze_btn.setEnabled(True) # Removed
         self.process_btn.setEnabled(True)
+        self.convert_lsf_btn.setEnabled(True) # Ensure this is re-enabled
+        self.convert_lsx_btn.setEnabled(True) # Ensure this is re-enabled
         self.cancel_btn.setEnabled(False)
         
         # Update status
