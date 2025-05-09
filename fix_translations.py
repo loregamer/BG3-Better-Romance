@@ -9,12 +9,69 @@ import shutil
 import keyring
 import json
 import subprocess # Added for Divine.exe
+import multiprocessing
 from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QLabel, QLineEdit, QPushButton, QTextEdit, QFileDialog,
                            QProgressBar, QMessageBox, QCheckBox, QGridLayout, QStatusBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
+# Helper function for multiprocessing LSX conversion
+def process_lsx_file_conversion(args):
+    divine_exe_path, file_path_str, delete_original = args
+    file_path_obj = Path(file_path_str)
+    source_path = str(file_path_obj)
+    filename = file_path_obj.name
+    logs = []
+
+    if filename.lower() == "meta.lsx":
+        logs.append(f"Skipping: {source_path} (meta.lsx)")
+        return {"status": "skipped", "path": source_path, "logs": logs}
+
+    destination_path = file_path_obj.with_suffix(".lsf")
+    command = [
+        divine_exe_path,
+        "--action", "convert-resource",
+        "--game", "bg3",
+        "--source", source_path,
+        "--destination", str(destination_path),
+        "--loglevel", "error"
+    ]
+
+    try:
+        logs.append(f"Converting: {source_path} -> {destination_path}")
+        process_run_args = {"capture_output": True, "text": True, "check": False}
+        if sys.platform != "win32": # shell=False is default and preferred
+            process_run_args["shell"] = False
+        else: # On Windows, sometimes shell=True is needed for .exe if not in PATH
+             # However, Divine.exe is called by full path, so shell=False should be fine.
+             # Forcing shell=False for security and consistency.
+            process_run_args["shell"] = False
+
+        process = subprocess.run(command, **process_run_args)
+
+        if process.returncode == 0:
+            logs.append(f"Successfully converted: {destination_path}")
+            if delete_original:
+                try:
+                    os.remove(source_path)
+                    logs.append(f"Successfully deleted original file: {source_path}")
+                except OSError as e:
+                    logs.append(f"Error deleting original file {source_path}: {e}")
+            return {"status": "converted", "path": source_path, "logs": logs}
+        else:
+            log_msg = f"Error converting {source_path}:\n"
+            log_msg += f"  Return code: {process.returncode}\n"
+            if process.stdout:
+                log_msg += f"  Stdout: {process.stdout.strip()}\n"
+            if process.stderr:
+                log_msg += f"  Stderr: {process.stderr.strip()}\n"
+            logs.append(log_msg)
+            return {"status": "error", "path": source_path, "details": log_msg, "logs": logs}
+    except Exception as e:
+        error_msg = f"Exception during conversion of {source_path}: {e}"
+        logs.append(error_msg)
+        return {"status": "error", "path": source_path, "details": error_msg, "logs": logs}
 
 class LsxConverterWorker(QThread):
     """Worker thread for converting LSX to LSF files."""
@@ -32,10 +89,6 @@ class LsxConverterWorker(QThread):
 
     def run(self):
         try:
-            converted_files = 0
-            skipped_files = 0 # Not applicable here but keep structure
-            error_files = []
-
             if not os.path.exists(self.divine_exe_path):
                 self.error_signal.emit(f"Error: Divine.exe not found at {self.divine_exe_path}")
                 return
@@ -43,9 +96,7 @@ class LsxConverterWorker(QThread):
             self.progress_update.emit(f"Starting LSX to LSF conversion using Divine.exe from: {self.divine_exe_path}")
             self.progress_update.emit(f"Scanning directory: {self.search_dir}")
 
-            files_to_scan = []
             search_path_obj = Path(self.search_dir)
-
             if self.recursive:
                 self.progress_update.emit(f"Scanning directory recursively: {search_path_obj}")
                 all_files_in_dir = [f for f in search_path_obj.rglob("*.lsx") if f.is_file()]
@@ -61,72 +112,135 @@ class LsxConverterWorker(QThread):
             total_files = len(files_to_scan)
             self.progress_update.emit(f"Found {total_files} .lsx files to potentially convert.")
 
-            for i, file_path_obj in enumerate(files_to_scan):
-                if not self.running:
-                    self.progress_update.emit("LSX Conversion Canceled.")
-                    return
+            if total_files == 0:
+                self.progress_percent.emit(100)
+                self.finished_signal.emit({"converted_files": 0, "skipped_files": 0, "error_files": [], "total_scanned": 0})
+                return
 
-                self.progress_percent.emit(int(((i + 1) / total_files) * 100))
-                
-                filename = file_path_obj.name # Get filename
-                source_path = str(file_path_obj)
-
-                if filename.lower() == "meta.lsx": # Check for meta.lsx
-                    self.progress_update.emit(f"Skipping: {source_path} (meta.lsx)")
-                    skipped_files += 1
-                    continue
-                
-                destination_path = file_path_obj.with_suffix(".lsf")
-
-                command = [
-                    self.divine_exe_path,
-                    "--action", "convert-resource",
-                    "--game", "bg3",
-                    "--source", source_path,
-                    "--destination", str(destination_path),
-                    "--loglevel", "error"
-                ]
-
-                try:
-                    self.progress_update.emit(f"Converting: {source_path} -> {destination_path}")
-                    process = subprocess.run(command, capture_output=True, text=True, check=False, shell=False)
-                    
-                    if process.returncode == 0:
-                        self.progress_update.emit(f"Successfully converted: {destination_path}")
-                        converted_files += 1
-                        try:
-                            os.remove(source_path)
-                            self.progress_update.emit(f"Successfully deleted original file: {source_path}")
-                        except OSError as e:
-                            self.progress_update.emit(f"Error deleting original file {source_path}: {e}")
-                            # Optionally, add to error_files or handle as a non-critical error
-                    else:
-                        self.progress_update.emit(f"Error converting {source_path}:")
-                        self.progress_update.emit(f"  Return code: {process.returncode}")
-                        if process.stdout:
-                            self.progress_update.emit(f"  Stdout: {process.stdout.strip()}")
-                        if process.stderr:
-                            self.progress_update.emit(f"  Stderr: {process.stderr.strip()}")
-                        error_files.append(source_path)
-                except Exception as e:
-                    self.progress_update.emit(f"Exception during conversion of {source_path}: {e}")
-                    error_files.append(source_path)
+            converted_files = 0
+            skipped_files = 0
+            error_files = []
             
-            self.progress_percent.emit(100)
-            result = {
+            # True for delete_original, matching original behavior
+            tasks = [(self.divine_exe_path, str(f_obj), True) for f_obj in files_to_scan]
+
+            # Determine number of processes: min of files, cpu_count, or a sensible max like 8 if cpu_count is very high
+            # This prevents creating too many processes for few files or overwhelming system with too many.
+            # A practical limit like 16 or 32 could also be considered if cpu_count() is excessively large.
+            max_processes = multiprocessing.cpu_count()
+            num_processes = min(total_files, max_processes)
+            if num_processes == 0 and total_files > 0 : # Ensure at least one process if there are files
+                num_processes = 1
+
+            self.progress_update.emit(f"Using {num_processes} worker processes.")
+
+            processed_count = 0
+            try:
+                with multiprocessing.Pool(processes=num_processes) as pool:
+                    results_iterator = pool.imap_unordered(process_lsx_file_conversion, tasks)
+                    
+                    for i, result_dict in enumerate(results_iterator):
+                        processed_count = i + 1
+                        if not self.running:
+                            self.progress_update.emit("LSX Conversion Canceled by user.")
+                            break
+                        
+                        for log_message in result_dict.get("logs", []):
+                            self.progress_update.emit(log_message)
+
+                        status = result_dict["status"]
+                        if status == "converted":
+                            converted_files += 1
+                        elif status == "skipped":
+                            skipped_files += 1
+                        elif status == "error":
+                            error_files.append(result_dict["path"])
+                        
+                        self.progress_percent.emit(int(((processed_count) / total_files) * 100))
+            except Exception as e: # Catch exceptions during pool operations
+                self.error_signal.emit(f"Error during multiprocessing pool execution: {str(e)}")
+                # Fall through to emit finished_signal with current counts
+
+            # Ensure progress bar reaches 100% if not cancelled early and all files processed
+            if self.running and processed_count == total_files:
+                 self.progress_percent.emit(100)
+            elif not self.running : # If cancelled, emit current progress
+                 self.progress_percent.emit(int(((processed_count) / total_files) * 100))
+
+
+            final_result = {
                 "converted_files": converted_files,
-                "skipped_files": skipped_files, # Now correctly tracks skipped meta.lsx
+                "skipped_files": skipped_files,
                 "error_files": error_files,
-                "total_scanned": total_files
+                "total_scanned": processed_count # Use processed_count in case of cancellation
             }
-            self.finished_signal.emit(result)
+            self.finished_signal.emit(final_result)
 
         except Exception as e:
             self.error_signal.emit(f"Error in LsxConverterWorker: {str(e)}")
+            # Emit finished with whatever data is available if an unexpected error occurs early
+            # This might be redundant if the inner try-except for the pool handles it.
+            # Consider if a default/empty result should be emitted here.
+            # For now, relying on error_signal and the pool's own final_result emission.
 
     def stop(self):
         """Stop the worker thread."""
         self.running = False
+
+# Helper function for multiprocessing LSF conversion
+def process_lsf_file_conversion(args):
+    divine_exe_path, file_path_str, delete_original = args
+    file_path_obj = Path(file_path_str)
+    source_path = str(file_path_obj)
+    filename = file_path_obj.name
+    logs = []
+
+    if filename.lower() == "meta.lsf": # Note: .lsf check
+        logs.append(f"Skipping: {source_path} (meta.lsf)")
+        return {"status": "skipped", "path": source_path, "logs": logs}
+
+    destination_path = file_path_obj.with_suffix(".lsx") # Note: .lsx destination
+    command = [
+        divine_exe_path,
+        "--action", "convert-resource",
+        "--game", "bg3",
+        "--source", source_path,
+        "--destination", str(destination_path),
+        "--loglevel", "error"
+    ]
+
+    try:
+        logs.append(f"Converting: {source_path} -> {destination_path}")
+        process_run_args = {"capture_output": True, "text": True, "check": False}
+        if sys.platform != "win32":
+            process_run_args["shell"] = False
+        else:
+            process_run_args["shell"] = False # Keep shell=False for Divine.exe
+
+        process = subprocess.run(command, **process_run_args)
+
+        if process.returncode == 0:
+            logs.append(f"Successfully converted: {destination_path}")
+            if delete_original:
+                try:
+                    os.remove(source_path)
+                    logs.append(f"Successfully deleted original file: {source_path}")
+                except OSError as e:
+                    logs.append(f"Error deleting original file {source_path}: {e}")
+            return {"status": "converted", "path": source_path, "logs": logs}
+        else:
+            log_msg = f"Error converting {source_path}:\n"
+            log_msg += f"  Return code: {process.returncode}\n"
+            if process.stdout:
+                log_msg += f"  Stdout: {process.stdout.strip()}\n"
+            if process.stderr:
+                log_msg += f"  Stderr: {process.stderr.strip()}\n"
+            logs.append(log_msg)
+            return {"status": "error", "path": source_path, "details": log_msg, "logs": logs}
+    except Exception as e:
+        error_msg = f"Exception during conversion of {source_path}: {e}"
+        logs.append(error_msg)
+        return {"status": "error", "path": source_path, "details": error_msg, "logs": logs}
 
 class LsfConverterWorker(QThread):
     """Worker thread for converting LSF to LSX files."""
@@ -144,10 +258,6 @@ class LsfConverterWorker(QThread):
 
     def run(self):
         try:
-            converted_files = 0
-            skipped_files = 0
-            error_files = []
-
             if not os.path.exists(self.divine_exe_path):
                 self.error_signal.emit(f"Error: Divine.exe not found at {self.divine_exe_path}")
                 return
@@ -155,17 +265,14 @@ class LsfConverterWorker(QThread):
             self.progress_update.emit(f"Starting LSF to LSX conversion using Divine.exe from: {self.divine_exe_path}")
             self.progress_update.emit(f"Scanning directory: {self.search_dir}")
 
-            files_to_scan = []
             search_path_obj = Path(self.search_dir)
-
             if self.recursive:
                 self.progress_update.emit(f"Scanning directory recursively: {search_path_obj}")
-                all_files_in_dir = [f for f in search_path_obj.rglob("*.lsf") if f.is_file()]
+                all_files_in_dir = [f for f in search_path_obj.rglob("*.lsf") if f.is_file()] # Note: .lsf
             else:
                 self.progress_update.emit(f"Scanning directory (non-recursively): {search_path_obj}")
-                all_files_in_dir = [f for f in search_path_obj.glob("*.lsf") if f.is_file()]
+                all_files_in_dir = [f for f in search_path_obj.glob("*.lsf") if f.is_file()] # Note: .lsf
             
-            # Filter out files in .git or Tools directory
             files_to_scan = [
                 f for f in all_files_in_dir
                 if ".git" not in f.parts and "Tools" not in f.parts
@@ -174,65 +281,63 @@ class LsfConverterWorker(QThread):
             total_files = len(files_to_scan)
             self.progress_update.emit(f"Found {total_files} .lsf files to potentially convert.")
 
-            for i, file_path_obj in enumerate(files_to_scan):
-                if not self.running:
-                    self.progress_update.emit("LSF Conversion Canceled.")
-                    return
+            if total_files == 0:
+                self.progress_percent.emit(100)
+                self.finished_signal.emit({"converted_files": 0, "skipped_files": 0, "error_files": [], "total_scanned": 0})
+                return
 
-                self.progress_percent.emit(int(((i + 1) / total_files) * 100))
-                
-                filename = file_path_obj.name
-                source_path = str(file_path_obj)
-                
-                if filename.lower() == "meta.lsf":
-                    self.progress_update.emit(f"Skipping: {source_path} (meta.lsf)")
-                    skipped_files += 1
-                    continue
-
-                destination_path = file_path_obj.with_suffix(".lsx")
-
-                command = [
-                    self.divine_exe_path,
-                    "--action", "convert-resource",
-                    "--game", "bg3",
-                    "--source", source_path,
-                    "--destination", str(destination_path),
-                    "--loglevel", "error"
-                ]
-
-                try:
-                    self.progress_update.emit(f"Converting: {source_path} -> {destination_path}")
-                    process = subprocess.run(command, capture_output=True, text=True, check=False, shell=False)
-                    
-                    if process.returncode == 0:
-                        self.progress_update.emit(f"Successfully converted: {destination_path}")
-                        converted_files += 1
-                        try:
-                            os.remove(source_path)
-                            self.progress_update.emit(f"Successfully deleted original file: {source_path}")
-                        except OSError as e:
-                            self.progress_update.emit(f"Error deleting original file {source_path}: {e}")
-                            # Optionally, add to error_files or handle as a non-critical error
-                    else:
-                        self.progress_update.emit(f"Error converting {source_path}:")
-                        self.progress_update.emit(f"  Return code: {process.returncode}")
-                        if process.stdout:
-                            self.progress_update.emit(f"  Stdout: {process.stdout.strip()}")
-                        if process.stderr:
-                            self.progress_update.emit(f"  Stderr: {process.stderr.strip()}")
-                        error_files.append(source_path)
-                except Exception as e:
-                    self.progress_update.emit(f"Exception during conversion of {source_path}: {e}")
-                    error_files.append(source_path)
+            converted_files = 0
+            skipped_files = 0
+            error_files = []
             
-            self.progress_percent.emit(100)
-            result = {
+            tasks = [(self.divine_exe_path, str(f_obj), True) for f_obj in files_to_scan]
+
+            max_processes = multiprocessing.cpu_count()
+            num_processes = min(total_files, max_processes)
+            if num_processes == 0 and total_files > 0 :
+                num_processes = 1
+            
+            self.progress_update.emit(f"Using {num_processes} worker processes.")
+
+            processed_count = 0
+            try:
+                with multiprocessing.Pool(processes=num_processes) as pool:
+                    results_iterator = pool.imap_unordered(process_lsf_file_conversion, tasks) # Use new helper
+                    
+                    for i, result_dict in enumerate(results_iterator):
+                        processed_count = i + 1
+                        if not self.running:
+                            self.progress_update.emit("LSF Conversion Canceled by user.")
+                            break
+                        
+                        for log_message in result_dict.get("logs", []):
+                            self.progress_update.emit(log_message)
+
+                        status = result_dict["status"]
+                        if status == "converted":
+                            converted_files += 1
+                        elif status == "skipped":
+                            skipped_files += 1
+                        elif status == "error":
+                            error_files.append(result_dict["path"])
+                        
+                        self.progress_percent.emit(int(((processed_count) / total_files) * 100))
+            except Exception as e:
+                self.error_signal.emit(f"Error during multiprocessing pool execution: {str(e)}")
+
+
+            if self.running and processed_count == total_files:
+                 self.progress_percent.emit(100)
+            elif not self.running :
+                 self.progress_percent.emit(int(((processed_count) / total_files) * 100))
+
+            final_result = {
                 "converted_files": converted_files,
                 "skipped_files": skipped_files,
                 "error_files": error_files,
-                "total_scanned": total_files
+                "total_scanned": processed_count
             }
-            self.finished_signal.emit(result)
+            self.finished_signal.emit(final_result)
 
         except Exception as e:
             self.error_signal.emit(f"Error in LsfConverterWorker: {str(e)}")
